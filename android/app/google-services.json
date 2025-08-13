@@ -1,0 +1,47 @@
+{
+  "project_info": {
+    "project_number": "843862816246",
+    "project_id": "codecraft-5bdc7",
+    "storage_bucket": "codecraft-5bdc7.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:843862816246:android:e769bc0cb288b5ca9e03d7",
+        "android_client_info": {
+          "package_name": "com.bearon.codecraft_project"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "843862816246-l2fi6j2j25vtjdts2f80kjv36po6sb6j.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.bearon.codecraft_project",
+            "certificate_hash": "a7e81390f52d27a5e5b16987579179ba2a5ef2ea"
+          }
+        },
+        {
+          "client_id": "843862816246-rbl5c99fq37qv8p48ccjenr4ro70r5an.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBdH-4PkistMyWmCOAARUHSYdM7pzB-5Ks"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "843862816246-rbl5c99fq37qv8p48ccjenr4ro70r5an.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

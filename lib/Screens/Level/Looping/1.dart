@@ -1,0 +1,957 @@
+import 'package:flutter/material.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_auth/firebase_auth.dart';
+
+// Enum untuk tipe blok yang tersedia
+enum BlockType { move, repeat }
+
+// Kelas Block untuk menyimpan data blok program
+class Block {
+  final BlockType type;
+  int repeatCount;
+  List<Block> children;
+
+  Block({
+    required this.type,
+    this.repeatCount = 2,
+    List<Block>? children,
+  }) : children = children ?? [];
+}
+
+// Halaman utama Level 1
+class LevelOneScreen extends StatefulWidget {
+  const LevelOneScreen({super.key});
+
+  @override
+  State<LevelOneScreen> createState() => _LevelOneScreenState();
+}
+
+class _LevelOneScreenState extends State<LevelOneScreen> with TickerProviderStateMixin {
+  static const int maxProgramBlocks = 12; // Maksimum blok program
+  static const int goalBlockCount = 5;    // Target jumlah blok
+
+  List<Block> program = []; // List blok program
+  int penguinPosition = 0;  // Posisi penguin di grid
+  bool isRunning = false;   // Status program berjalan
+  bool showFail = false;    // Tampilkan overlay gagal
+  bool showSuccess = false; // Tampilkan overlay sukses
+  bool trashActive = false; // Status area trash aktif
+  bool showTutorial = true; // Tampilkan tutorial
+  bool showHint = false;    // Tampilkan hint
+  List<int>? runningBlockPath; // Path blok yang sedang dijalankan
+
+  late AnimationController _controller;
+  late Animation<double> _penguinScale;
+  final ScrollController _scrollController = ScrollController();
+  final PageController _pageController = PageController();
+
+  DateTime? _levelEnterTime; // Waktu masuk level
+
+  // Update progress level user di Firestore
+  Future<void> _updateProgress(int level) async {
+    final user = FirebaseAuth.instance.currentUser;
+    if (user != null) {
+      final doc = FirebaseFirestore.instance.collection('user_progress').doc(user.uid);
+      final snapshot = await doc.get();
+      final currentLevel = snapshot.exists ? (snapshot.data()?['highestLevel'] ?? 1) : 1;
+      if (level > currentLevel) {
+        await doc.set({'highestLevel': level}, SetOptions(merge: true));
+      }
+    }
+  }
+
+  // Tambah jumlah percobaan user
+  Future<void> _incrementAttempt() async {
+    final user = FirebaseAuth.instance.currentUser;
+    if (user != null) {
+      final doc = FirebaseFirestore.instance.collection('user_progress').doc(user.uid);
+      await doc.set({'totalAttempt': FieldValue.increment(1)}, SetOptions(merge: true));
+    }
+  }
+
+  // Tambah waktu yang dihabiskan user
+  Future<void> _addTimeSpent(int seconds) async {
+    final user = FirebaseAuth.instance.currentUser;
+    if (user != null) {
+      final doc = FirebaseFirestore.instance.collection('user_progress').doc(user.uid);
+      await doc.set({'totalTimeSpent': FieldValue.increment(seconds)}, SetOptions(merge: true));
+    }
+  }
+
+  // Simpan waktu yang dihabiskan saat keluar level
+  Future<void> _saveLevelTimeSpent() async {
+    if (_levelEnterTime != null) {
+      final secondsSpent = DateTime.now().difference(_levelEnterTime!).inSeconds;
+      await _addTimeSpent(secondsSpent);
+    }
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    isRunning = false;
+    _controller = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 300),
+      lowerBound: 0.9,
+      upperBound: 1.1,
+    );
+    _penguinScale = Tween<double>(begin: 1, end: 1.1).animate(_controller);
+    _levelEnterTime = DateTime.now();
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    _scrollController.dispose();
+    _pageController.dispose();
+    _saveLevelTimeSpent();
+    super.dispose();
+  }
+
+  // Jalankan program yang sudah disusun user
+  void runProgram() async {
+    if (isRunning) return;
+    await _incrementAttempt();
+    _pageController.animateToPage(
+      0,
+      duration: const Duration(milliseconds: 400),
+      curve: Curves.easeInOut,
+    );
+    setState(() {
+      isRunning = true;
+      showFail = false;
+      showSuccess = false;
+      penguinPosition = 0;
+    });
+    await _execute(program);
+
+    setState(() {
+      isRunning = false;
+      if (penguinPosition == 5 && _countBlocks(program) <= goalBlockCount) {
+        showSuccess = true;
+      } else {
+        showFail = true;
+      }
+    });
+  }
+
+  // Eksekusi list blok program secara rekursif
+  Future<void> _execute(List<Block> blocks, [List<int> parentPath = const []]) async {
+    for (int i = 0; i < blocks.length; i++) {
+      final block = blocks[i];
+      final currentPath = [...parentPath, i];
+      setState(() {
+        runningBlockPath = currentPath;
+      });
+      await Future.delayed(const Duration(milliseconds: 200));
+
+      if (block.type == BlockType.move) {
+        if (penguinPosition < 5) {
+          await _controller.forward();
+          await Future.delayed(const Duration(milliseconds: 200));
+          await _controller.reverse();
+          setState(() => penguinPosition++);
+          await Future.delayed(const Duration(milliseconds: 300));
+        }
+      } else if (block.type == BlockType.repeat) {
+        for (int j = 0; j < block.repeatCount; j++) {
+          await _execute(block.children, currentPath);
+        }
+      }
+    }
+    setState(() {
+      runningBlockPath = null;
+    });
+  }
+
+  // Tampilkan pesan jika jumlah blok melebihi batas
+  void _showLimitMessage() {
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Maximum program length reached!')),
+    );
+  }
+
+  // Hitung jumlah blok total (termasuk di dalam loop)
+  int _countBlocks(List<Block> blocks) {
+    int count = 0;
+    for (var block in blocks) {
+      count++;
+      if (block.type == BlockType.repeat) {
+        count += _countBlocks(block.children);
+      }
+    }
+    return count;
+  }
+
+  // Ambil blok berdasarkan path
+  Block _getBlockByPath(List<Block> root, List<int> path) {
+    Block current = root[path[0]];
+    for (int i = 1; i < path.length; i++) {
+      current = current.children[path[i]];
+    }
+    return current;
+  }
+
+  // Hapus blok berdasarkan path
+  void _removeBlockByPath(List<Block> root, List<int> path) {
+    if (path.length == 1) {
+      root.removeAt(path[0]);
+    } else {
+      List<int> parentPath = path.sublist(0, path.length - 1);
+      Block parent = _getBlockByPath(root, parentPath);
+      parent.children.removeAt(path.last);
+    }
+  }
+
+  // Masukkan blok ke path tertentu
+  void _insertBlockByPath(List<Block> root, List<int> path, int insertAt, Block block) {
+    if (path.isEmpty) {
+      root.insert(insertAt, block);
+    } else {
+      Block parent = _getBlockByPath(root, path);
+      parent.children.insert(insertAt, block);
+    }
+  }
+
+  // Cek apakah path descendant dari ancestor
+  bool _isDescendant(List<int> ancestor, List<int> descendant) {
+    if (ancestor.length >= descendant.length) return false;
+    for (int i = 0; i < ancestor.length; i++) {
+      if (ancestor[i] != descendant[i]) return false;
+    }
+    return true;
+  }
+
+  // Widget untuk menampilkan blok program (move/loop)
+  Widget buildBlock(Block block, List<int> path, {int indent = 0}) {
+    final isRunning = runningBlockPath != null && runningBlockPath!.join(',') == path.join(',');
+    final isLoopActive = runningBlockPath != null &&
+        runningBlockPath!.length > path.length &&
+        List.generate(path.length, (i) => runningBlockPath![i] == path[i]).every((e) => e);
+
+    return Padding(
+      padding: EdgeInsets.only(left: indent * 20.0, bottom: 8),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          LongPressDraggable<List<int>>(
+            data: path,
+            delay: const Duration(milliseconds: 100),
+            feedback: Material(
+              color: Colors.transparent,
+              child: _blockChip(block, dragging: true, highlight: isRunning),
+            ),
+            childWhenDragging: Opacity(opacity: 0.3, child: _blockChip(block, highlight: isRunning)),
+            child: DragTarget<List<int>>(
+              onWillAccept: (fromPath) {
+                if (fromPath == null) return false;
+                if (fromPath.toString() == path.toString()) return false;
+                if (_isDescendant(fromPath, path)) return false;
+                return true;
+              },
+              onAccept: (fromPath) {
+                setState(() {
+                  Block moved = _getBlockByPath(program, fromPath);
+                  _removeBlockByPath(program, fromPath);
+                  _insertBlockByPath(program, path.sublist(0, path.length - 1), path.last, moved);
+                });
+              },
+              builder: (context, candidateData, rejectedData) {
+                if (block.type == BlockType.move) {
+                  return _blockChip(block, highlight: isRunning);
+                } else {
+                  return Container(
+                    margin: const EdgeInsets.symmetric(vertical: 4),
+                    decoration: BoxDecoration(
+                      color: isLoopActive
+                          ? Colors.green[200]
+                          : (isRunning ? Colors.green[300] : Colors.green[50]),
+                      border: Border.all(
+                        color: isLoopActive || isRunning ? Colors.green : Colors.green,
+                        width: isLoopActive ? 3 : 2.5,
+                      ),
+                      borderRadius: BorderRadius.circular(18),
+                      boxShadow: [
+                        BoxShadow(
+                          color: Colors.green.withOpacity(0.08),
+                          blurRadius: 6,
+                          offset: const Offset(0, 2),
+                        ),
+                      ],
+                    ),
+                    child: Padding(
+                      padding: const EdgeInsets.all(10.0),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              _blockChip(block, highlight: isRunning),
+                              const SizedBox(width: 8),
+                              IconButton(
+                                icon: const Icon(Icons.remove, size: 18, color: Colors.green),
+                                onPressed: block.repeatCount > 2 && !isRunning
+                                    ? () => setState(() => block.repeatCount--)
+                                    : null,
+                                splashRadius: 18,
+                                padding: EdgeInsets.zero,
+                                constraints: const BoxConstraints(),
+                              ),
+                              Text(
+                                "${block.repeatCount}",
+                                style: const TextStyle(fontFamily: 'Jua', fontWeight: FontWeight.bold),
+                              ),
+                              IconButton(
+                                icon: const Icon(Icons.add, size: 18, color: Colors.green),
+                                onPressed: !isRunning
+                                    ? () => setState(() => block.repeatCount++)
+                                    : null,
+                                splashRadius: 18,
+                                padding: EdgeInsets.zero,
+                                constraints: const BoxConstraints(),
+                              ),
+                            ],
+                          ),
+                          for (int i = 0; i < block.children.length; i++)
+                            buildBlock(block.children[i], [...path, i], indent: indent + 1),
+                          DragTarget<List<int>>(
+                            onWillAccept: (fromPath) {
+                              if (fromPath == null) return false;
+                              if (_isDescendant(fromPath, [...path, block.children.length])) return false;
+                              return true;
+                            },
+                            onAccept: (fromPath) {
+                              setState(() {
+                                Block moved = _getBlockByPath(program, fromPath);
+                                _removeBlockByPath(program, fromPath);
+                                block.children.add(moved);
+                              });
+                            },
+                            builder: (context, candidateData, rejectedData) => Container(
+                              margin: const EdgeInsets.symmetric(vertical: 6, horizontal: 4),
+                              padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 14),
+                              decoration: BoxDecoration(
+                                color: candidateData.isNotEmpty ? Colors.green[100] : Colors.green[50],
+                                borderRadius: BorderRadius.circular(12),
+                                border: Border.all(
+                                  color: candidateData.isNotEmpty ? Colors.green : Colors.green[200]!,
+                                  width: 1.5,
+                                ),
+                              ),
+                              child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  const Icon(Icons.arrow_downward, color: Colors.green, size: 16),
+                                  const SizedBox(width: 4),
+                                  Text(
+                                    "Drop block here",
+                                    style: TextStyle(
+                                      fontFamily: 'Jua',
+                                      fontSize: 12,
+                                      color: Colors.green[700],
+                                      fontWeight: FontWeight.bold,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  );
+                }
+              },
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // Widget untuk chip blok (move/loop)
+  Widget _blockChip(Block block, {bool dragging = false, bool highlight = false}) {
+    Color? bg;
+    if (block.type == BlockType.move) {
+      bg = highlight ? Colors.blue[300] : (dragging ? Colors.blue[200] : Colors.blue[100]);
+      return Chip(
+        label: const Text("Move", style: TextStyle(fontFamily: 'Jua', fontSize: 16)),
+        backgroundColor: bg,
+        avatar: const Icon(Icons.arrow_forward, color: Colors.blue),
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+        side: BorderSide.none,
+      );
+    } else {
+      bg = highlight ? Colors.green[400] : (dragging ? Colors.green[200] : Colors.green[100]);
+      return Chip(
+        label: Text("Loop x${block.repeatCount}", style: const TextStyle(fontFamily: 'Jua', fontSize: 16)),
+        backgroundColor: bg,
+        avatar: const Icon(Icons.repeat, color: Colors.green),
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+        side: BorderSide.none,
+      );
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    // UI utama dengan PageView (game dan program area)
+    return PageView(
+      controller: _pageController,
+      physics: const BouncingScrollPhysics(),
+      children: [
+        // Halaman utama game
+        Stack(
+          children: [
+            Container(
+              decoration: const BoxDecoration(
+                image: DecorationImage(
+                  image: AssetImage('assets/igloo3.png'),
+                  fit: BoxFit.cover,
+                ),
+              ),
+            ),
+            Scaffold(
+              backgroundColor: Colors.transparent,
+              appBar: AppBar(
+                title: Row(
+                  children: [
+                    const Text("Level 1", style: TextStyle(fontFamily: 'Jua', color: Colors.black)),
+                    const SizedBox(width: 100),
+                    ElevatedButton.icon(
+                      onPressed: () {
+                        setState(() {
+                          showHint = true;
+                        });
+                      },
+                      icon: const Icon(Icons.lightbulb, color: Colors.amber, size: 22),
+                      label: const Text("Hint", style: TextStyle(fontFamily: 'Jua', color: Colors.black)),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.yellow[200],
+                        foregroundColor: Colors.black,
+                        elevation: 0,
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                        textStyle: const TextStyle(fontFamily: 'Jua', fontWeight: FontWeight.bold),
+                      ),
+                    ),
+                  ],
+                ),
+                backgroundColor: Colors.white,
+                elevation: 0,
+                iconTheme: const IconThemeData(color: Colors.black),
+              ),
+              body: Column(
+                children: [
+                  const Padding(
+                    padding: EdgeInsets.only(top: 32, bottom: 4),
+                    child: Text(
+                      "Snippy: Aku mau menangkap ikan!\n\nJalankan aku di program area!\nGunakan 5 Move Blok",
+                      style: TextStyle(
+                        color: Colors.black87,
+                        fontFamily: 'Jua',
+                        fontSize: 18,
+                      ),
+                      textAlign: TextAlign.center,
+                    ),
+                  ),
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 8),
+                    child: Text(
+                      "Goal: Gerakan aku 5 petak kedepan!",
+                      style: const TextStyle(
+                        fontWeight: FontWeight.bold,
+                        fontFamily: 'Jua',
+                        fontSize: 14,
+                        color: Color.fromRGBO(204, 0, 0, 1),
+                      ),
+                    ),
+                  ),
+                  Expanded(
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 24.0),
+                      child: GridView.builder(
+                        physics: const NeverScrollableScrollPhysics(),
+                        gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                          crossAxisCount: 6,
+                          crossAxisSpacing: 12,
+                          mainAxisSpacing: 12,
+                        ),
+                        itemCount: 6,
+                        itemBuilder: (context, index) {
+                          if (index == penguinPosition) {
+                            return ScaleTransition(
+                              scale: _penguinScale,
+                              child: Container(
+                                decoration: BoxDecoration(
+                                  color: Colors.blue[50],
+                                  borderRadius: BorderRadius.circular(18),
+                                  border: Border.all(color: Colors.blueAccent, width: 2),
+                                ),
+                                child: Center(
+                                  child: Image.asset(
+                                    'assets/penguin2.png',
+                                    width: 100,
+                                    height: 100,
+                                    fit: BoxFit.contain,
+                                  ),
+                                ),
+                              ),
+                            );
+                          } else if (index == 5) {
+                            return Container(
+                              decoration: BoxDecoration(
+                                color: Colors.blue[50],
+                                borderRadius: BorderRadius.circular(18),
+                                border: Border.all(color: Colors.blue, width: 2),
+                              ),
+                              child: Image.asset(
+                                'assets/fish.png',
+                                width: 60,
+                                height: 60,
+                                fit: BoxFit.contain,
+                              ),
+                            );
+                          } else {
+                            return Container(
+                              decoration: BoxDecoration(
+                                color: Colors.grey[200],
+                                borderRadius: BorderRadius.circular(18),
+                                border: Border.all(color: Colors.grey[400]!),
+                              ),
+                            );
+                          }
+                        },
+                      ),
+                    ),
+                  ),
+                  Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 2),
+                    child: Center(
+                      child: Padding(
+                        padding: const EdgeInsets.only(bottom: 40),
+                        child: ElevatedButton(
+                          onPressed: () {
+                            _pageController.animateToPage(
+                              1,
+                              duration: const Duration(milliseconds: 400),
+                              curve: Curves.easeInOut,
+                            );
+                          },
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: const Color.fromRGBO(186, 252, 255, 1),
+                            foregroundColor: const Color.fromARGB(255, 0, 0, 0),
+                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+                            padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 16),
+                            elevation: 0,
+                            minimumSize: const Size(100, 30),
+                          ),
+                          child: const Text(
+                            "Program Area",
+                            style: TextStyle(fontFamily: 'Jua', fontSize: 18),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            // Overlay hint, fail, success, tutorial
+            if (showHint)
+              Positioned.fill(
+                child: Container(
+                  color: Colors.black54,
+                  child: Center(
+                    child: Card(
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
+                      color: Colors.white,
+                      elevation: 4,
+                      child: Padding(
+                        padding: const EdgeInsets.all(32.0),
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            const Icon(Icons.lightbulb, color: Colors.amber, size: 60),
+                            const Text(
+                              "Hint",
+                              style: TextStyle(
+                                fontFamily: 'Jua',
+                                fontSize: 24,
+                                color: Colors.amber,
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
+                            const SizedBox(height: 12),
+                            const Text(
+                              "Klik tombol move 5 kali, setelah itu Run",
+                              style: TextStyle(
+                                fontFamily: 'Jua',
+                                fontSize: 16,
+                                color: Colors.black87,
+                              ),
+                              textAlign: TextAlign.center,
+                            ),
+                            const SizedBox(height: 20),
+                            ElevatedButton(
+                              onPressed: () => setState(() => showHint = false),
+                              child: const Text("Tutup", style: TextStyle(fontFamily: 'Jua')),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            if (showFail)
+              Positioned.fill(
+                child: Container(
+                  color: Colors.black54,
+                  child: Center(
+                    child: Card(
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
+                      color: Colors.white,
+                      elevation: 2,
+                      child: Padding(
+                        padding: const EdgeInsets.all(32.0),
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Image.asset(
+                              'assets/penguin_sad.png',
+                              width: 120,
+                              height: 120,
+                            ),
+                            const SizedBox(height: 16),
+                            const Text(
+                              "Program kamu salah!",
+                              style: TextStyle(fontFamily: 'Jua', fontSize: 20, color: Color.fromARGB(255, 54, 158, 244)),
+                            ),
+                            const SizedBox(height: 16),
+                            ElevatedButton(
+                              onPressed: () {
+                                setState(() {
+                                  penguinPosition = 0;
+                                  showFail = false;
+                                  isRunning = false;
+                                });
+                              },
+                              child: const Text("Coba Lagi", style: TextStyle(fontFamily: 'Jua')),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            if (showSuccess)
+              Positioned.fill(
+                child: Container(
+                  color: Colors.black54,
+                  child: Center(
+                    child: Card(
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
+                      color: Colors.white,
+                      elevation: 2,
+                      child: Padding(
+                        padding: const EdgeInsets.all(32.0),
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Image.asset(
+                              'assets/penguin1.png',
+                              width: 120,
+                              height: 120,
+                              fit: BoxFit.contain,
+                            ),
+                            const SizedBox(height: 16),
+                            const Text(
+                              "Program kamu berhasil!",
+                              style: TextStyle(fontFamily: 'Jua', fontSize: 28, color: Colors.green),
+                            ),
+                            const SizedBox(height: 16),
+                            ElevatedButton(
+                              onPressed: () async {
+                                await _updateProgress(2);
+                                Navigator.pushReplacementNamed(context, '/level2');
+                              },
+                              child: const Text("Next Level", style: TextStyle(fontFamily: 'Jua')),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            if (showTutorial)
+              Positioned.fill(
+                child: GestureDetector(
+                  onTap: () => setState(() => showTutorial = false),
+                  child: Container(
+                    color: Colors.black54,
+                    child: Center(
+                      child: Card(
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
+                        color: Colors.white,
+                        elevation: 4,
+                        child: Padding(
+                          padding: const EdgeInsets.all(32.0),
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Image.asset(
+                                'assets/penguin2.png',
+                                width: 100,
+                                height: 100,
+                              ),
+                              const SizedBox(height: 16),
+                              const Text(
+                                "Level 1 (Tutorial)",
+                                style: TextStyle(
+                                  fontFamily: 'Jua',
+                                  fontSize: 24,
+                                  color: Colors.blueAccent,
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              ),
+                              const SizedBox(height: 12),
+                              const Text(
+                                "BLOK: Blok adalah sebuah perintah berbentuk kotak\n"
+                                "NEST: Nest adalah sebuah blok yang bisa dimasukkan dengan blok lainnya\n"
+                                "MOVE: Move adalah sebuah blok untuk maju 1 langkah\n"
+                                "LOOP: Loop adalah sebuah nest yang mengulangi perintah didalamnya (x2, x3, x4, x5)\n \n"
+                                "1. Tekan tombol 'Move' untuk menambah blok gerak maju.\n"
+                                "2. Tekan tombol 'Loop' untuk menambah blok pengulangan.\n"
+                                "3. Seret dan susun blok sesuai urutan yang diinginkan.\n"
+                                "4. Untuk menghapus blok, seret ke area 'Trash'.\n",
+                                style: TextStyle(
+                                  fontFamily: 'Jua',
+                                  fontSize: 16,
+                                  color: Colors.black87,
+                                ),
+                                textAlign: TextAlign.center,
+                              ),
+                              const SizedBox(height: 20),
+                              const Text(
+                                "Tap di mana saja untuk mulai!",
+                                style: TextStyle(
+                                  fontFamily: 'Jua',
+                                  fontSize: 14,
+                                  color: Colors.grey,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+          ],
+        ),
+        // Halaman program area (untuk menyusun blok)
+        Scaffold(
+          backgroundColor: Colors.white,
+          appBar: AppBar(
+            leading: IconButton(
+              icon: const Icon(Icons.arrow_back, color: Colors.black),
+              onPressed: () {
+                _pageController.animateToPage(
+                  0,
+                  duration: const Duration(milliseconds: 400),
+                  curve: Curves.easeInOut,
+                );
+              },
+            ),
+            title: const Text("Your Program", style: TextStyle(fontFamily: 'Jua', color: Colors.black)),
+            backgroundColor: Colors.white,
+            elevation: 0,
+            iconTheme: const IconThemeData(color: Colors.black),
+          ),
+          body: Column(
+            children: [
+              const SizedBox(height: 8),
+              const Opacity(
+                opacity: 0.5,
+                child: Text(
+                  "Tekan, tahan, dan geser",
+                  style: TextStyle(fontFamily: 'Jua', fontSize: 13, color: Color.fromARGB(255, 255, 53, 53)),
+                ),
+              ),
+              Expanded(
+                child: Scrollbar(
+                  controller: _scrollController,
+                  thumbVisibility: true,
+                  child: SingleChildScrollView(
+                    controller: _scrollController,
+                    scrollDirection: Axis.horizontal,
+                    child: ConstrainedBox(
+                      constraints: const BoxConstraints(minWidth: 600),
+                      child: SingleChildScrollView(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: List.generate(
+                            program.length,
+                            (i) => buildBlock(program[i], [i]),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 8),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  SizedBox(
+                    height: 40,
+                    child: ElevatedButton.icon(
+                      onPressed: isRunning
+                          ? null
+                          : () {
+                              setState(() {
+                                program.clear();
+                              });
+                            },
+                      icon: const Icon(Icons.refresh, color: Colors.blue, size: 20),
+                      label: const Text("Reset", style: TextStyle(fontFamily: 'Jua', fontSize: 14)),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.blue[50],
+                        foregroundColor: Colors.blue[900],
+                        padding: const EdgeInsets.symmetric(horizontal: 12),
+                        minimumSize: const Size(80, 40),
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                        textStyle: const TextStyle(fontFamily: 'Jua'),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  SizedBox(
+                    height: 40,
+                    child: DragTarget<List<int>>(
+                      onWillAccept: (fromPath) => true,
+                      onMove: (_) => setState(() => trashActive = true),
+                      onLeave: (_) => setState(() => trashActive = false),
+                      onAccept: (fromPath) {
+                        setState(() {
+                          _removeBlockByPath(program, fromPath);
+                          trashActive = false;
+                        });
+                      },
+                      builder: (context, candidateData, rejectedData) => AnimatedContainer(
+                        duration: const Duration(milliseconds: 200),
+                        curve: Curves.ease,
+                        padding: const EdgeInsets.symmetric(horizontal: 10),
+                        decoration: BoxDecoration(
+                          color: trashActive || candidateData.isNotEmpty
+                              ? Colors.red[200]
+                              : Colors.red[50],
+                          borderRadius: BorderRadius.circular(12),
+                          border: Border.all(
+                            color: Colors.red[300]!,
+                            width: 2,
+                          ),
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(
+                              Icons.delete,
+                              size: 22,
+                              color: trashActive || candidateData.isNotEmpty
+                                  ? Colors.red[800]
+                                  : Colors.red[400],
+                            ),
+                            const SizedBox(width: 6),
+                            const Text(
+                              "Trash",
+                              style: TextStyle(
+                                fontFamily: 'Jua',
+                                fontSize: 14,
+                                color: Colors.red,
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 8),
+              SingleChildScrollView(
+                scrollDirection: Axis.horizontal,
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    SizedBox(
+                      height: 40,
+                      child: ElevatedButton.icon(
+                        onPressed: isRunning
+                            ? null
+                            : _countBlocks(program) < maxProgramBlocks
+                                ? () => setState(() => program.add(Block(type: BlockType.move)))
+                                : _showLimitMessage,
+                        icon: const Icon(Icons.arrow_forward, color: Colors.blue, size: 22),
+                        label: const Text("Move", style: TextStyle(fontFamily: 'Jua', fontSize: 16)),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: Colors.blue[100],
+                          foregroundColor: Colors.blue[900],
+                          padding: const EdgeInsets.symmetric(horizontal: 16),
+                          minimumSize: const Size(0, 40),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 16),
+                    SizedBox(
+                      height: 40,
+                      child: ElevatedButton.icon(
+                        onPressed: isRunning
+                            ? null
+                            : _countBlocks(program) < maxProgramBlocks
+                                ? () => setState(() => program.add(Block(type: BlockType.repeat)))
+                                : _showLimitMessage,
+                        icon: const Icon(Icons.repeat, color: Colors.green, size: 22),
+                        label: const Text("Loop", style: TextStyle(fontFamily: 'Jua', fontSize: 16)),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: Colors.green[100],
+                          foregroundColor: Colors.green[900],
+                          padding: const EdgeInsets.symmetric(horizontal: 16),
+                          minimumSize: const Size(0, 40),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 8),
+              SizedBox(
+                width: double.infinity,
+                child: ElevatedButton.icon(
+                  onPressed: isRunning ? null : runProgram,
+                  icon: const Icon(Icons.play_arrow, color: Colors.white, size: 28),
+                  label: const Text("Run", style: TextStyle(fontFamily: 'Jua', fontSize: 18, color: Colors.white)),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.blueAccent,
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                    padding: const EdgeInsets.all(12),
+                    elevation: 0,
+                  ),
+                ),
+              ),
+              const SizedBox(height: 8),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+}
